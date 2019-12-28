@@ -222,7 +222,7 @@ void setup()
 
 const char* formatPrefix = "{\"Type\":\"telem\",\"From\":\"%s\",\"To\":\"%s\",\"Time\":%lu";
 const char* formatCompass = ",\"Orient\":{\"Mag\":%f}";
-const char* formatGPS = "{,\"Coord\":{\"Lat\":%ld,\"Lon\":%ld,\"Alt\":%ld}";
+const char* formatGPS = ",\"Coord\":{\"Lat\":%ld,\"Lon\":%ld,\"Alt\":%ld}";
 
 char* fromId = "self";
 char* toId = "*";
