@@ -18,7 +18,7 @@
 #define ESP_PLATFORM
 #define HAVE_CONFIG_H
 #define F_CPU 240000000L
-#define ARDUINO 108010
+#define ARDUINO 10900
 #define ARDUINO_WIFI_LoRa_32
 #define ARDUINO_ARCH_ESP32
 #define ESP32

@@ -32,16 +32,29 @@
   Open the serial monitor at 115200 baud to see the output
 */
 
-#include <quaternionFilters.h>
-#include <MPU9250.h>
+//#include <quaternionFilters.h>
+//#include <MPU9250.h>
+#include <SparkFunMPU9250-DMP.h> // Include SparkFun MPU-9250-DMP library
 #include <Wire.h> //Needed for I2C to GPS
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include "SparkFun_Ublox_Arduino_Library.h" //http://librarymanager/All#SparkFun_Ublox_GPS
+#include "SSD1306.h"
 
 // WiFi network name and password:
 const char * networkName = "NETGEAR71";
 const char * networkPswd = "chummyskates355";
+
+MPU9250_DMP imu; // Create an instance of the MPU9250_DMP class
+
+#define OLED_I2C_ADDR 0x3C
+#define OLED_RESET 16
+#define OLED_SDA 4
+#define OLED_SCL 15
+
+unsigned int counter = 0;
+
+SSD1306 display(OLED_I2C_ADDR, OLED_SDA, OLED_SCL);
 
 uint8_t gpsI2Caddress = 0x42; //Default 7-bit unshifted address of the ublox 6/7/8/M8/F9 series
 
@@ -70,9 +83,14 @@ WiFiUDP udpIn;
 
 SFE_UBLOX_GPS myGPS;
 
-long lastTime = 0; //Simple local timer. Limits amount if I2C traffic to Ublox module.
+long lastTime1 = 0; //Simple local timer. Limits amount if I2C traffic to Ublox module.
+long lastTime2 = 0; //Simple local timer. Limits amount if I2C traffic to Ublox module.
 
-void connectToWiFi(const char * ssid, const char * pwd){
+//*****************************************************************************
+//
+//*****************************************************************************
+void connectToWiFi(const char * ssid, const char * pwd)
+{
   Serial.println("Connecting to WiFi network: " + String(ssid));
 
   // delete old config
@@ -86,9 +104,13 @@ void connectToWiFi(const char * ssid, const char * pwd){
   Serial.println("Waiting for WIFI connection...");
 }
 
-//wifi event handler
-void WiFiEvent(WiFiEvent_t event){
-    switch(event) {
+//*****************************************************************************
+//
+//*****************************************************************************
+void WiFiEvent(WiFiEvent_t event)
+{
+    switch(event)
+	{
       case SYSTEM_EVENT_STA_GOT_IP:
           //When connected set 
           Serial.print("WiFi connected! IP address: ");
@@ -106,11 +128,47 @@ void WiFiEvent(WiFiEvent_t event){
     }
 }
 
+//*****************************************************************************
+//
+//*****************************************************************************
+void initMpu()
+{
+    if (imu.begin() != INV_SUCCESS)
+    {
+        Serial.println("###### MPU Init Failed ######");
+        return;
+    }
+    else
+    {
+        Serial.println("--- MPU Init OK ---");
+    }
+    
+    // Use setSensors to turn on or off MPU-9250 sensors.
+    // Any of the following defines can be combined:
+    // INV_XYZ_GYRO, INV_XYZ_ACCEL, INV_XYZ_COMPASS,
+    // INV_X_GYRO, INV_Y_GYRO, or INV_Z_GYRO
+    //if( INV_SUCCESS != imu.setSensors(INV_XYZ_GYRO | INV_XYZ_ACCEL | INV_XYZ_COMPASS))
+    if (INV_SUCCESS != imu.setSensors(INV_XYZ_COMPASS))
+    {
+        Serial.println("###### MPU setSensors Failed ######");
+    }
+    else
+    {
+        Serial.println("--- MPU setSensors OK ---");
+    }
+}
+
+//*****************************************************************************
+//
+//*****************************************************************************
 void setup()
 {
   Serial.begin(115200);
   while (!Serial); //Wait for user to open terminal
   Serial.println("TTGpsPosSend");
+
+  //display.clear();
+  //display.drawString(0, 0, "TTGpsPosSend");
 
   //Connect to the WiFi network
   connectToWiFi(networkName, networkPswd);
@@ -124,104 +182,195 @@ void setup()
   }
 
   myGPS.setI2COutput(COM_TYPE_UBX); //Set the I2C port to output UBX only (turn off NMEA noise)
-
   myGPS.setPortInput(COM_PORT_I2C, COM_TYPE_UBX, 1000); //Set the I2C port to input ...
-
   myGPS.saveConfiguration(); //Save the current settings to flash and BBR
+
+  initMpu();
 }
 
 /*
 {
-	"type": "pose",
-	"id": "self",
-	"tow": 123456789,
-	"coord":
+	"Type":"telem",
+	"From":"aDrone",
+	"To":"to",
+	"Time":"5248817670575246558",
+	"Coord":
 	{
-		"lat":474685466,
-		"lon":3077292823,
-		"alt":138180
-	}
+		"Lat":47.468689019121889,
+		"Lon":-121.76736511387465,
+		"Alt":141.87001820094883
+	},
+	"Orient":
+	{
+		"Mag":60.5,
+		"True":45.0,
+		"X":0.0,
+		"Y":0.38268345594406128,
+		"Z":0.0,"W":0.92387950420379639
+	},
+	"Gimbal":
+	{
+		"X":0.38268345594406128,
+		"Y":0.0,
+		"Z":0.0,
+		"W":0.92387950420379639
+	},
+	"MissionState":"unknown",
+	"LandedState":"unknown"
 }
 */
 
-const char* poseFormat = "{\"type\": \"pose\",\"id\" : \"%s\", \"tow\" : %lu, \"coord\" : { \"lat\": %ld, \"lon\" : %ld, \"alt\" : %ld }}";
-char* senderId = "self";
-char outBuffer[1024];
+const char* formatPrefix = "{\"Type\":\"telem\",\"From\":\"%s\",\"To\":\"%s\",\"Time\":%lu";
+const char* formatCompass = ",\"Orient\":{\"Mag\":%f}";
+const char* formatGPS = "{,\"Coord\":{\"Lat\":%ld,\"Lon\":%ld,\"Alt\":%ld}";
 
+char* fromId = "self";
+char* toId = "*";
+char tempBuffer[1024];
+char outBuffer[1024];
+float _compass = 0;
+bool _haveCompass = false;
+bool _haveGps = false;
+long latitude = 0;
+long longitude = 0;
+long altitude = 0;
+unsigned int timeOfWeek = 0;
+
+//*****************************************************************************
+//
+//*****************************************************************************
+void buildOutString(char* buffer)
+{
+	sprintf(outBuffer, formatPrefix, fromId, toId, timeOfWeek);
+
+    if (_haveGps)
+    {
+        sprintf(tempBuffer, formatGPS, latitude, longitude, altitude);
+        strcat(outBuffer, tempBuffer);
+    }
+
+    if (_haveCompass)
+    {
+        sprintf(tempBuffer, formatCompass, _compass);
+        strcat(outBuffer, tempBuffer);
+    }
+
+    strcat(outBuffer, "}");
+}
+
+//*****************************************************************************
+//
+//*****************************************************************************
 void loop()
 {
-  //Query module only every second. Doing it more often will just cause I2C traffic.
-  //The module only responds when a new position is available
-  if (millis() - lastTime > 1000)
-  {
-    lastTime = millis(); //Update the timer
+    _haveCompass = false;
+    _haveGps = false;
 
-	long latitude = myGPS.getLatitude();
-	long longitude = myGPS.getLongitude();
-	long altitude = myGPS.getAltitude();
-	unsigned long timeOfWeek = myGPS.getTimeOfWeek();
+    if (millis() - lastTime1 > 1000)
+    {
+        lastTime1 = millis(); //Update the timer
 
-	sprintf(outBuffer, poseFormat, senderId, timeOfWeek, latitude, longitude, altitude);
+        if (!imu.dataReady())
+        {
+            Serial.println("###### IMU data not ready ######");
+        }
+        else
+        {
+	        //Latch IMU values
+	        //if (INV_SUCCESS != imu.update(UPDATE_ACCEL | UPDATE_GYRO | UPDATE_COMPASS))
+            //if (INV_SUCCESS != imu.update(UPDATE_COMPASS))
+            if (INV_SUCCESS != imu.updateCompass())
+	        {
+	            Serial.println("###### IMU update Failed ######");
+                initMpu();
+	        }
+	        else
+	        {
+                _haveCompass = true;
+	            //float accelX = imu.calcAccel(imu.ax); // accelX is x-axis acceleration in g's
+	            //float accelY = imu.calcAccel(imu.ay); // accelY is y-axis acceleration in g's
+	            //float accelZ = imu.calcAccel(imu.az); // accelZ is z-axis acceleration in g's
 
-	//only send data when connected
-	if (connected) 
+	            //float gyroX = imu.calcGyro(imu.gx); // gyroX is x-axis rotation in dps
+	            //float gyroY = imu.calcGyro(imu.gy); // gyroY is y-axis rotation in dps
+	            //float gyroZ = imu.calcGyro(imu.gz); // gyroZ is z-axis rotation in dps
+
+	            //float magX = imu.calcMag(imu.mx); // magX is x-axis magnetic field in uT
+	            //float magY = imu.calcMag(imu.my); // magY is y-axis magnetic field in uT
+	            //float magZ = imu.calcMag(imu.mz); // magZ is z-axis magnetic field in uT
+
+                _compass = imu.computeCompassHeading();
+
+                //sprintf(outBuffer, "magHXYZ: %f, %f, %f, %f", compass, magX, magY, magZ);
+      	        //sprintf(outBuffer, "compass: %f", _compass);
+        	    //Serial.println(outBuffer);
+	        }
+		}
+	}
+    	
+	//Query module only every second. Doing it more often will just cause I2C traffic.
+	//The module only responds when a new position is available
+	if (millis() - lastTime2 > 1000)
 	{
-		//Send a packet
-		udpOut.beginPacket(udpOutAddress, udpOutPort);
-		udpOut.print(outBuffer);
-		udpOut.endPacket();
+		lastTime2 = millis(); //Update the timer
+
+		latitude = myGPS.getLatitude();
+		longitude = myGPS.getLongitude();
+		altitude = myGPS.getAltitude();
+		timeOfWeek = myGPS.getTimeOfWeek();
+
+		_haveGps = true;
+
+		//byte SIV = myGPS.getSIV();
+		//Serial.print(F(" SIV: "));
+		//Serial.print(SIV);
+        //Serial.println();
 	}
 
-	Serial.println(outBuffer);
-    
-    //long latitude = myGPS.getLatitude();
-    //Serial.print(F("> Pos: Lat: "));
-    //Serial.print(latitude);
+    if (_haveCompass | _haveGps)
+    {
+        buildOutString(outBuffer);
+        Serial.println(outBuffer);
 
-    //long longitude = myGPS.getLongitude();
-    //Serial.print(F(" Long: "));
-    //Serial.print(longitude);
-    //Serial.print(F(" (degrees * 10^-7)"));
+        if (connected)
+        {
+            //Send a packet
+            udpOut.beginPacket(udpOutAddress, udpOutPort);
+            udpOut.print(outBuffer);
+            udpOut.endPacket();
+        }
+    }
 
-    //long altitude = myGPS.getAltitude();
-    //Serial.print(F(" Alt: "));
-    //Serial.print(altitude);
-    //Serial.print(F(" (mm)"));
+	// if there's data available, read a packet
+	int packetSize = udpIn.parsePacket();
+	if (packetSize)
+	{
+		Serial.print("> RTCM: size: ");
+		Serial.print(packetSize);
+		Serial.print(", From: ");
+		IPAddress remote = udpIn.remoteIP();
+		
+		for (int i = 0; i < 4; i++) 
+        {
+			Serial.print(remote[i], DEC);
+			if (i < 3) 
+	        {
+				Serial.print(".");
+			}
+		}
+		
+		Serial.print(":");
+		Serial.println(udpIn.remotePort());
 
-    byte SIV = myGPS.getSIV();
-    Serial.print(F(" SIV: "));
-    Serial.print(SIV);
+		// read the packet into packetBufffer
+		udpIn.read(inBuffer, inDataBufferSize);
+		//Serial.println("Contents:");
+		//Serial.println(inBuffer);
 
-    Serial.println();
-  }
-  //else
-  //{  // if there's data available, read a packet
-	  int packetSize = udpIn.parsePacket();
-	  if (packetSize)
-	  {
-		  Serial.print("> RTCM: size: ");
-		  Serial.print(packetSize);
-		  Serial.print(", From: ");
-		  IPAddress remote = udpIn.remoteIP();
-		  for (int i = 0; i < 4; i++) {
-			  Serial.print(remote[i], DEC);
-			  if (i < 3) {
-				  Serial.print(".");
-			  }
-		  }
-		  Serial.print(":");
-		  Serial.println(udpIn.remotePort());
-
-		  // read the packet into packetBufffer
-		  udpIn.read(inBuffer, inDataBufferSize);
-		  //Serial.println("Contents:");
-		  //Serial.println(inBuffer);
-
-		  Serial.println(">>>> Sending RTCM to I2C");
-		  Wire.beginTransmission(gpsI2Caddress); 
-		  Wire.write(inBuffer, packetSize);              
-		  Wire.endTransmission();     
-		  Serial.println("Sent RTCM to I2C <<<<");
-	  }
-  //}
+		Serial.println(">>>> Sending RTCM to I2C");
+		Wire.beginTransmission(gpsI2Caddress); 
+		Wire.write(inBuffer, packetSize);              
+		Wire.endTransmission();     
+		Serial.println("Sent RTCM to I2C <<<<");
+	}
 }
