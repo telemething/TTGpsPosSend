@@ -32,20 +32,49 @@
   Open the serial monitor at 115200 baud to see the output
 */
 
-//#include <quaternionFilters.h>
-//#include <MPU9250.h>
+//#define DMP
+#define MPU
+
+#ifdef MPU
+#include <quaternionFilters.h>
+#include <MPU9250.h>
+#endif // MPU
+#ifdef DMP
 #include <SparkFunMPU9250-DMP.h> // Include SparkFun MPU-9250-DMP library
+#endif // DMP
 #include <Wire.h> //Needed for I2C to GPS
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include "SparkFun_Ublox_Arduino_Library.h" //http://librarymanager/All#SparkFun_Ublox_GPS
+
+#ifdef OLED
 #include "SSD1306.h"
+#endif // OLED
 
 // WiFi network name and password:
 const char * networkName = "NETGEAR71";
 const char * networkPswd = "chummyskates355";
 
+#ifdef MPU
+#define AHRS false         // Set to false for basic data read
+#define SerialDebug true  // Set to true to get Serial output for debugging
+
+// Pin definitions
+int intPin = 12;  // These can be changed, 2 and 3 are the Arduinos ext int pins
+int myLed = 13;  // Set up pin 13 led for toggling
+
+#define I2Cclock 400000
+#define I2Cport Wire
+//#define MPU9250_ADDRESS MPU9250_ADDRESS_AD0   // Use either this line or the next to select which I2C address your device is using
+//#define MPU9250_ADDRESS MPU9250_ADDRESS_AD1
+
+//MPU9250 myIMU(MPU9250_ADDRESS, I2Cport, I2Cclock);
+MPU9250 myIMU;
+#endif // MPU
+
+#ifdef DMP
 MPU9250_DMP imu; // Create an instance of the MPU9250_DMP class
+#endif //DMP
 
 #define OLED_I2C_ADDR 0x3C
 #define OLED_RESET 16
@@ -54,7 +83,9 @@ MPU9250_DMP imu; // Create an instance of the MPU9250_DMP class
 
 unsigned int counter = 0;
 
+#ifdef OLED
 SSD1306 display(OLED_I2C_ADDR, OLED_SDA, OLED_SCL);
+#endif
 
 uint8_t gpsI2Caddress = 0x42; //Default 7-bit unshifted address of the ublox 6/7/8/M8/F9 series
 
@@ -133,6 +164,112 @@ void WiFiEvent(WiFiEvent_t event)
 //*****************************************************************************
 void initMpu()
 {
+#ifdef MPU
+
+    // Read the WHO_AM_I register, this is a good test of communication
+    byte c = myIMU.readByte(MPU9250_ADDRESS, WHO_AM_I_MPU9250);
+    Serial.print(F("MPU9250 I AM 0x"));
+    Serial.print(c, HEX);
+    Serial.print(F(" I should be 0x"));
+    Serial.println(0x71, HEX);
+
+    if (c == 0x71) // WHO_AM_I should always be 0x71
+    {
+        Serial.println(F("MPU9250 is online..."));
+
+        // Start by performing self test and reporting values
+        myIMU.MPU9250SelfTest(myIMU.SelfTest);
+        Serial.print(F("x-axis self test: acceleration trim within : "));
+        Serial.print(myIMU.SelfTest[0], 1); Serial.println("% of factory value");
+        Serial.print(F("y-axis self test: acceleration trim within : "));
+        Serial.print(myIMU.SelfTest[1], 1); Serial.println("% of factory value");
+        Serial.print(F("z-axis self test: acceleration trim within : "));
+        Serial.print(myIMU.SelfTest[2], 1); Serial.println("% of factory value");
+        Serial.print(F("x-axis self test: gyration trim within : "));
+        Serial.print(myIMU.SelfTest[3], 1); Serial.println("% of factory value");
+        Serial.print(F("y-axis self test: gyration trim within : "));
+        Serial.print(myIMU.SelfTest[4], 1); Serial.println("% of factory value");
+        Serial.print(F("z-axis self test: gyration trim within : "));
+        Serial.print(myIMU.SelfTest[5], 1); Serial.println("% of factory value");
+
+        // Calibrate gyro and accelerometers, load biases in bias registers
+        //myIMU.calibrateMPU9250(myIMU.gyroBias, myIMU.accelBias);
+    }
+    else
+        Serial.println(F("### MPU9250 is not online ###"));
+
+    myIMU.initMPU9250();
+    // Initialize device for active mode read of acclerometer, gyroscope, and
+    // temperature
+    Serial.println("MPU9250 initialized for active data mode....");
+
+    // Read the WHO_AM_I register of the magnetometer, this is a good test of
+    // communication
+    byte d = myIMU.readByte(AK8963_ADDRESS, WHO_AM_I_AK8963);
+    Serial.print("AK8963 ");
+    Serial.print("I AM 0x");
+    Serial.print(d, HEX);
+    Serial.print(" I should be 0x");
+    Serial.println(0x48, HEX);
+
+    if (d != 0x48)
+    {
+        // Communication failed, stop here
+        Serial.println(F("Magnetometer communication failed"));
+        Serial.flush();
+        //return;
+    }
+
+	// Get magnetometer calibration from AK8963 ROM
+    myIMU.initAK8963(myIMU.magCalibration);
+    // Initialize device for active mode read of magnetometer
+    Serial.println("AK8963 initialized for active data mode....");
+
+    if (SerialDebug)
+    {
+        //  Serial.println("Calibration values: ");
+        Serial.print("X-Axis factory sensitivity adjustment value ");
+        Serial.println(myIMU.magCalibration[0], 2);
+        Serial.print("Y-Axis factory sensitivity adjustment value ");
+        Serial.println(myIMU.magCalibration[1], 2);
+        Serial.print("Z-Axis factory sensitivity adjustment value ");
+        Serial.println(myIMU.magCalibration[2], 2);
+    }
+
+    // Get sensor resolutions, only need to do this once
+    myIMU.getAres();
+    myIMU.getGres();
+    myIMU.getMres();
+
+    // The next call delays for 4 seconds, and then records about 15 seconds of
+	// data to calculate bias and scale.
+	//myIMU.magCalMPU9250(myIMU.magBias, myIMU.magScale);
+    Serial.println("AK8963 mag biases (mG)");
+    Serial.println(myIMU.magbias[0]);
+    Serial.println(myIMU.magbias[1]);
+    Serial.println(myIMU.magbias[2]);
+
+    //Serial.println("AK8963 mag scale (mG)");
+    //Serial.println(myIMU.magScale[0]);
+    //Serial.println(myIMU.magScale[1]);
+    //Serial.println(myIMU.magScale[2]);
+    //    delay(2000); // Add delay to see results before serial spew of data
+
+    if (SerialDebug)
+    {
+        Serial.println("Magnetometer:");
+        Serial.print("X-Axis sensitivity adjustment value ");
+        Serial.println(myIMU.magCalibration[0], 2);
+        Serial.print("Y-Axis sensitivity adjustment value ");
+        Serial.println(myIMU.magCalibration[1], 2);
+        Serial.print("Z-Axis sensitivity adjustment value ");
+        Serial.println(myIMU.magCalibration[2], 2);
+	}
+
+
+#endif // MPU
+	
+#ifdef DMP
     if (imu.begin() != INV_SUCCESS)
     {
         Serial.println("###### MPU Init Failed ######");
@@ -156,6 +293,12 @@ void initMpu()
     {
         Serial.println("--- MPU setSensors OK ---");
     }
+#endif //DMP
+}
+
+void ResetGps()
+{
+	myGPS.hardReset();
 }
 
 //*****************************************************************************
@@ -174,6 +317,7 @@ void setup()
   connectToWiFi(networkName, networkPswd);
 
   Wire.begin();
+  Wire.setClock(400000); //Increase I2C clock speed to 400kHz
 
   if (myGPS.begin() == false) //Connect to the Ublox module using Wire port
   {
@@ -235,13 +379,15 @@ long latitude = 0;
 long longitude = 0;
 long altitude = 0;
 unsigned int timeOfWeek = 0;
+int _second = 0;
+unsigned int _milliSecond = 0;
 
 //*****************************************************************************
 //
 //*****************************************************************************
 void buildOutString(char* buffer)
 {
-	sprintf(outBuffer, formatPrefix, fromId, toId, timeOfWeek);
+	sprintf(outBuffer, formatPrefix, fromId, toId, _milliSecond);
 
     if (_haveGps)
     {
@@ -266,6 +412,7 @@ void loop()
     _haveCompass = false;
     _haveGps = false;
 
+#ifdef DMP
     if (millis() - lastTime1 > 1000)
     {
         lastTime1 = millis(); //Update the timer
@@ -282,7 +429,7 @@ void loop()
             if (INV_SUCCESS != imu.updateCompass())
 	        {
 	            Serial.println("###### IMU update Failed ######");
-                initMpu();
+                //initMpu();
 	        }
 	        else
 	        {
@@ -304,27 +451,64 @@ void loop()
                 //sprintf(outBuffer, "magHXYZ: %f, %f, %f, %f", compass, magX, magY, magZ);
       	        //sprintf(outBuffer, "compass: %f", _compass);
         	    //Serial.println(outBuffer);
+
+                delay(100);
 	        }
 		}
 	}
-    	
+#endif // DMP
+	
 	//Query module only every second. Doing it more often will just cause I2C traffic.
 	//The module only responds when a new position is available
 	if (millis() - lastTime2 > 1000)
 	{
 		lastTime2 = millis(); //Update the timer
 
-		latitude = myGPS.getLatitude();
+        if (!myGPS.isConnected())
+        {
+            Serial.println("###### isConnected() not ok ######");
+            //return;
+        }
+
+        /*if (!myGPS.checkUblox())
+        {
+            Serial.println("###### checkUblox() not ok ######");
+            return;
+        }*/
+
+        latitude = myGPS.getLatitude();
 		longitude = myGPS.getLongitude();
 		altitude = myGPS.getAltitude();
 		timeOfWeek = myGPS.getTimeOfWeek();
 
+		//myGPS.processRTCMframe()
+
+        //int second = myGPS.getSecond();
+        //Serial.print(F(" second: "));
+        //Serial.print(second);
+
+        unsigned int milliSecond = ((((myGPS.getHour() * 60) + myGPS.getMinute()) * 60) + myGPS.getSecond()) * 1000 + myGPS.getMillisecond();
+
+        if (milliSecond == _milliSecond)
+        {
+            if (_milliSecond != 0)
+            {
+                _milliSecond = 0;
+                //Serial.println("###### milliSecond not changed, resetting GPS ######");
+                Serial.println("###### milliSecond not changed #####");
+                //ResetGps();
+                return;
+            }
+        }
+        else
+            _milliSecond = milliSecond;
+
 		_haveGps = true;
 
-		//byte SIV = myGPS.getSIV();
-		//Serial.print(F(" SIV: "));
-		//Serial.print(SIV);
-        //Serial.println();
+		byte SIV = myGPS.getSIV();
+		Serial.print(F(" SIV: "));
+		Serial.print(SIV);
+        Serial.println();
 	}
 
     if (_haveCompass | _haveGps)
