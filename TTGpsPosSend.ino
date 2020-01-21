@@ -33,8 +33,13 @@
 */
 
 //#define DMP
-#define MPU
+//#define MPU
+#define ICM20948
 
+#ifdef ICM20948
+#include "ICM_20948.h"  // Click here to get the library: http://librarymanager/All#SparkFun_ICM_20948_IMU
+//#define USE_SPI       // Uncomment this to use SPI
+#endif
 #ifdef MPU
 #include <quaternionFilters.h>
 #include <MPU9250.h>
@@ -50,6 +55,25 @@
 #ifdef OLED
 #include "SSD1306.h"
 #endif // OLED
+
+#ifdef ICM20948
+#define SERIAL_PORT Serial
+
+#define SPI_PORT SPI    // Your desired SPI port.       Used only when "USE_SPI" is defined
+#define CS_PIN 2        // Which pin you connect CS to. Used only when "USE_SPI" is defined
+
+#define WIRE_PORT Wire  // Your desired Wire port.      Used when "USE_SPI" is not defined
+#define AD0_VAL   1     // The value of the last bit of the I2C address. 
+                        // On the SparkFun 9DoF IMU breakout the default is 1, and when 
+                        // the ADR jumper is closed the value becomes 0
+#endif
+
+#ifdef USE_SPI
+ICM_20948_SPI myICM;  // If using SPI create an ICM_20948_SPI object
+#else
+ICM_20948_I2C myICM;  // Otherwise create an ICM_20948_I2C object
+#endif
+
 
 // WiFi network name and password:
 const char * networkName = "NETGEAR71";
@@ -114,8 +138,33 @@ WiFiUDP udpIn;
 
 SFE_UBLOX_GPS myGPS;
 
-long lastTime1 = 0; //Simple local timer. Limits amount if I2C traffic to Ublox module.
-long lastTime2 = 0; //Simple local timer. Limits amount if I2C traffic to Ublox module.
+unsigned long _lastMpuReadTime = 0; //Simple local timer. Limits amount if I2C traffic to Ublox module.
+unsigned long _lastGpsReadTime = 0; //Simple local timer. Limits amount if I2C traffic to Ublox module.
+
+unsigned long _lastGpsTimeMillis = 0; //The computer time of the last GPS reading
+
+bool MpuInitialized = false;
+
+const char* formatPrefix = "{\"Type\":\"telem\",\"From\":\"%s\",\"To\":\"%s\",\"Time\":%lu";
+const char* formatCompass = ",\"Orient\":{\"Mag\":%f}";
+const char* formatGPS = ",\"Coord\":{\"Lat\":%ld,\"Lon\":%ld,\"Alt\":%ld}";
+
+char* fromId = "self";
+char* toId = "*";
+char tempBuffer[1024];
+char outBuffer[1024];
+float _compass = 0;
+bool _haveCompass = false;
+bool _haveGps = false;
+long latitude = 0;
+long longitude = 0;
+long altitude = 0;
+unsigned int timeOfWeek = 0;
+int _second = 0;
+unsigned int _milliSecond = 0;
+
+unsigned long _timeBetweenMpuReadsMs = 100;
+unsigned long _timeBetweenGpsReadsMs = 1000;
 
 //*****************************************************************************
 //
@@ -164,6 +213,39 @@ void WiFiEvent(WiFiEvent_t event)
 //*****************************************************************************
 void initMpu()
 {
+#ifdef USE_SPI
+    SPI_PORT.begin();
+    myICM.begin(CS_PIN, SPI_PORT);
+#else
+    myICM.begin(WIRE_PORT, AD0_VAL);
+#endif
+
+#ifdef ICM20948
+    if (myGPS.begin() == false) //Connect to the Ublox module using Wire port
+    {
+        Serial.println(F("Ublox GPS not detected at default I2C address. Please check wiring. Freezing."));
+        while (1);
+    }
+
+    myGPS.setI2COutput(COM_TYPE_UBX); //Set the I2C port to output UBX only (turn off NMEA noise)
+    //myGPS.setPortInput(COM_PORT_I2C, COM_TYPE_UBX, 1000); //Set the I2C port to input ...
+    myGPS.setNavigationFrequency(1); //Produce one solutions per second
+    myGPS.setAutoPVT(true); //Tell the GPS to "send" each solution
+    myGPS.saveConfiguration(); //Save the current settings to flash and BBR
+
+    Serial.print(F("Initialization of the sensor returned: "));
+    Serial.println(myICM.statusString());
+    if (myICM.status != ICM_20948_Stat_Ok) 
+    {
+        Serial.println("Trying again...");
+        delay(500);
+    }
+    else 
+    {
+        MpuInitialized = true;
+    }
+
+#endif
 #ifdef MPU
 
     // Read the WHO_AM_I register, this is a good test of communication
@@ -319,16 +401,6 @@ void setup()
   Wire.begin();
   Wire.setClock(400000); //Increase I2C clock speed to 400kHz
 
-  if (myGPS.begin() == false) //Connect to the Ublox module using Wire port
-  {
-    Serial.println(F("Ublox GPS not detected at default I2C address. Please check wiring. Freezing."));
-    while (1);
-  }
-
-  myGPS.setI2COutput(COM_TYPE_UBX); //Set the I2C port to output UBX only (turn off NMEA noise)
-  myGPS.setPortInput(COM_PORT_I2C, COM_TYPE_UBX, 1000); //Set the I2C port to input ...
-  myGPS.saveConfiguration(); //Save the current settings to flash and BBR
-
   initMpu();
 }
 
@@ -364,30 +436,19 @@ void setup()
 }
 */
 
-const char* formatPrefix = "{\"Type\":\"telem\",\"From\":\"%s\",\"To\":\"%s\",\"Time\":%lu";
-const char* formatCompass = ",\"Orient\":{\"Mag\":%f}";
-const char* formatGPS = ",\"Coord\":{\"Lat\":%ld,\"Lon\":%ld,\"Alt\":%ld}";
-
-char* fromId = "self";
-char* toId = "*";
-char tempBuffer[1024];
-char outBuffer[1024];
-float _compass = 0;
-bool _haveCompass = false;
-bool _haveGps = false;
-long latitude = 0;
-long longitude = 0;
-long altitude = 0;
-unsigned int timeOfWeek = 0;
-int _second = 0;
-unsigned int _milliSecond = 0;
-
 //*****************************************************************************
 //
 //*****************************************************************************
 void buildOutString(char* buffer)
 {
-	sprintf(outBuffer, formatPrefix, fromId, toId, _milliSecond);
+    unsigned int timeOffset = 0;
+
+    //if we are between GPS readings, find the time elapsed since the last one
+    if (!_haveGps)
+        if(_lastGpsTimeMillis > 0)
+            timeOffset = millis() - _lastGpsTimeMillis;
+
+	sprintf(outBuffer, formatPrefix, fromId, toId, _milliSecond + timeOffset);
 
     if (_haveGps)
     {
@@ -409,9 +470,35 @@ void buildOutString(char* buffer)
 //*****************************************************************************
 void loop()
 {
+    //Serial.println("---");
+
     _haveCompass = false;
     _haveGps = false;
+	
+#ifdef ICM20948
+    if (millis() - _lastMpuReadTime > _timeBetweenMpuReadsMs)
+    {
+        _lastMpuReadTime = millis(); //Update the timer
 
+        if (myICM.dataReady())
+        {
+            // read MPU data
+            myICM.getAGMT();                
+
+            _compass = computeCompassHeading(myICM.agmt);
+            _haveCompass = true;
+
+            // printRawAGMT( myICM.agmt );     // Uncomment this to see the raw values, taken directly from the agmt structure
+            // printScaledAGMT(myICM.agmt);   // This function takes into account the scale settings from when the measurement was made to calculate the values with units
+            //delay(30);
+        }
+        else
+        {
+            Serial.println("Waiting for data");
+            //delay(500);
+        }
+    }
+#endif	
 #ifdef DMP
     if (millis() - lastTime1 > 1000)
     {
@@ -460,9 +547,13 @@ void loop()
 	
 	//Query module only every second. Doing it more often will just cause I2C traffic.
 	//The module only responds when a new position is available
-	if (millis() - lastTime2 > 1000)
-	{
-		lastTime2 = millis(); //Update the timer
+    //if (false)
+    if (millis() - _lastGpsReadTime > _timeBetweenGpsReadsMs)
+    if (myGPS.getPVT())
+    {
+        _lastGpsReadTime = millis(); //Update the timer
+
+        //Serial.println("--- gotPVT ---");
 
         if (!myGPS.isConnected())
         {
@@ -476,16 +567,15 @@ void loop()
             return;
         }*/
 
+
+        //return;
+
         latitude = myGPS.getLatitude();
 		longitude = myGPS.getLongitude();
 		altitude = myGPS.getAltitude();
 		timeOfWeek = myGPS.getTimeOfWeek();
 
 		//myGPS.processRTCMframe()
-
-        //int second = myGPS.getSecond();
-        //Serial.print(F(" second: "));
-        //Serial.print(second);
 
         unsigned int milliSecond = ((((myGPS.getHour() * 60) + myGPS.getMinute()) * 60) + myGPS.getSecond()) * 1000 + myGPS.getMillisecond();
 
@@ -501,14 +591,17 @@ void loop()
             }
         }
         else
+        {
             _milliSecond = milliSecond;
+            _lastGpsTimeMillis = millis();
+        }
 
 		_haveGps = true;
 
-		byte SIV = myGPS.getSIV();
-		Serial.print(F(" SIV: "));
-		Serial.print(SIV);
-        Serial.println();
+		//byte SIV = myGPS.getSIV();
+		//Serial.print(F(" SIV: "));
+		//Serial.print(SIV);
+        //Serial.println();
 	}
 
     if (_haveCompass | _haveGps)
@@ -524,6 +617,8 @@ void loop()
             udpOut.endPacket();
         }
     }
+
+    //Serial.println("---");
 
 	// if there's data available, read a packet
 	int packetSize = udpIn.parsePacket();
@@ -558,3 +653,156 @@ void loop()
 		Serial.println("Sent RTCM to I2C <<<<");
 	}
 }
+
+float computeCompassHeading(ICM_20948_AGMT_t agmt)
+{
+    float heading;
+    float mx = agmt.mag.axes.x;
+    float my = agmt.mag.axes.y;
+
+    if (my == 0)
+        heading = (mx < 0) ? PI : 0;
+    else
+        heading = atan2(mx, my);
+
+    if (heading > PI) heading -= (2 * PI);
+    else if (heading < -PI) heading += (2 * PI);
+    else if (heading < 0) heading += 2 * PI;
+
+    heading *= 180.0 / PI;
+
+    return heading;
+}
+
+// Below here are some helper functions to print the data nicely!
+
+void printPaddedInt16b(int16_t val) {
+    if (val > 0) {
+        SERIAL_PORT.print(" ");
+        if (val < 10000) { SERIAL_PORT.print("0"); }
+        if (val < 1000) { SERIAL_PORT.print("0"); }
+        if (val < 100) { SERIAL_PORT.print("0"); }
+        if (val < 10) { SERIAL_PORT.print("0"); }
+    }
+    else {
+        SERIAL_PORT.print("-");
+        if (abs(val) < 10000) { SERIAL_PORT.print("0"); }
+        if (abs(val) < 1000) { SERIAL_PORT.print("0"); }
+        if (abs(val) < 100) { SERIAL_PORT.print("0"); }
+        if (abs(val) < 10) { SERIAL_PORT.print("0"); }
+    }
+    SERIAL_PORT.print(abs(val));
+}
+
+void printRawAGMT(ICM_20948_AGMT_t agmt) {
+    SERIAL_PORT.print("RAW. Acc [ ");
+    printPaddedInt16b(agmt.acc.axes.x);
+    SERIAL_PORT.print(", ");
+    printPaddedInt16b(agmt.acc.axes.y);
+    SERIAL_PORT.print(", ");
+    printPaddedInt16b(agmt.acc.axes.z);
+    SERIAL_PORT.print(" ], Gyr [ ");
+    printPaddedInt16b(agmt.gyr.axes.x);
+    SERIAL_PORT.print(", ");
+    printPaddedInt16b(agmt.gyr.axes.y);
+    SERIAL_PORT.print(", ");
+    printPaddedInt16b(agmt.gyr.axes.z);
+    SERIAL_PORT.print(" ], Mag [ ");
+    printPaddedInt16b(agmt.mag.axes.x);
+    SERIAL_PORT.print(", ");
+    printPaddedInt16b(agmt.mag.axes.y);
+    SERIAL_PORT.print(", ");
+    printPaddedInt16b(agmt.mag.axes.z);
+    SERIAL_PORT.print(" ], Tmp [ ");
+    printPaddedInt16b(agmt.tmp.val);
+    SERIAL_PORT.print(" ]");
+    SERIAL_PORT.println();
+}
+
+
+void printFormattedFloat(float val, uint8_t leading, uint8_t decimals) {
+    float aval = abs(val);
+    if (val < 0) {
+        SERIAL_PORT.print("-");
+    }
+    else {
+        SERIAL_PORT.print(" ");
+    }
+    for (uint8_t indi = 0; indi < leading; indi++) {
+        uint32_t tenpow = 0;
+        if (indi < (leading - 1)) {
+            tenpow = 1;
+        }
+        for (uint8_t c = 0; c < (leading - 1 - indi); c++) {
+            tenpow *= 10;
+        }
+        if (aval < tenpow) {
+            SERIAL_PORT.print("0");
+        }
+        else {
+            break;
+        }
+    }
+    if (val < 0) {
+        SERIAL_PORT.print(-val, decimals);
+    }
+    else {
+        SERIAL_PORT.print(val, decimals);
+    }
+}
+
+void printScaledAGMT(ICM_20948_AGMT_t agmt) {
+    SERIAL_PORT.print("Scaled. Acc (mg) [ ");
+    printFormattedFloat(myICM.accX(), 5, 2);
+    SERIAL_PORT.print(", ");
+    printFormattedFloat(myICM.accY(), 5, 2);
+    SERIAL_PORT.print(", ");
+    printFormattedFloat(myICM.accZ(), 5, 2);
+    SERIAL_PORT.print(" ], Gyr (DPS) [ ");
+    printFormattedFloat(myICM.gyrX(), 5, 2);
+    SERIAL_PORT.print(", ");
+    printFormattedFloat(myICM.gyrY(), 5, 2);
+    SERIAL_PORT.print(", ");
+    printFormattedFloat(myICM.gyrZ(), 5, 2);
+    SERIAL_PORT.print(" ], Mag (uT) [ ");
+    printFormattedFloat(myICM.magX(), 5, 2);
+    SERIAL_PORT.print(", ");
+    printFormattedFloat(myICM.magY(), 5, 2);
+    SERIAL_PORT.print(", ");
+    printFormattedFloat(myICM.magZ(), 5, 2);
+    SERIAL_PORT.print(" ], Tmp (C) [ ");
+    printFormattedFloat(myICM.temp(), 5, 2);
+    SERIAL_PORT.print(" ]");
+    SERIAL_PORT.println();
+}
+
+void printMagCalOut(ICM_20948_AGMT_t dpEng)
+{
+    // Print the sensor data
+    Serial.print("Raw:");
+
+    Serial.print(dpEng.acc.axes.x);
+    Serial.print(',');
+    Serial.print(dpEng.acc.axes.y);
+    Serial.print(',');
+    Serial.print(dpEng.acc.axes.z);
+    Serial.print(',');
+
+    Serial.print(dpEng.gyr.axes.x);
+    Serial.print(',');
+    Serial.print(dpEng.gyr.axes.y);
+    Serial.print(',');
+    Serial.print(dpEng.gyr.axes.z);
+    Serial.print(',');
+
+    Serial.print(dpEng.mag.axes.x);
+    Serial.print(',');
+    Serial.print(dpEng.mag.axes.y);
+    Serial.print(',');
+    Serial.print(dpEng.mag.axes.z);
+    Serial.println();
+}
+
+//*********************************************************
+
+
