@@ -36,6 +36,8 @@
 //#define MPU
 #define ICM20948
 
+//#include <SoftwareSerial.h>
+
 #ifdef ICM20948
 #include "ICM_20948.h"  // Click here to get the library: http://librarymanager/All#SparkFun_ICM_20948_IMU
 //#define USE_SPI       // Uncomment this to use SPI
@@ -76,7 +78,7 @@ ICM_20948_I2C myICM;  // Otherwise create an ICM_20948_I2C object
 
 
 // WiFi network name and password:
-const char * networkName = "NETGEAR71";
+const char * networkName = "ROUTER1";
 const char * networkPswd = "chummyskates355";
 
 #ifdef MPU
@@ -226,6 +228,13 @@ void initMpu()
         Serial.println(F("Ublox GPS not detected at default I2C address. Please check wiring. Freezing."));
         while (1);
     }
+
+    //myGPS.begin()
+
+    //new
+    //myGPS.setUART1Output(COM_TYPE_UBX);
+
+    myGPS.setUART2Output(COM_TYPE_UBX);
 
     myGPS.setI2COutput(COM_TYPE_UBX); //Set the I2C port to output UBX only (turn off NMEA noise)
     //myGPS.setPortInput(COM_PORT_I2C, COM_TYPE_UBX, 1000); //Set the I2C port to input ...
@@ -392,6 +401,10 @@ void setup()
   while (!Serial); //Wait for user to open terminal
   Serial.println("TTGpsPosSend");
 
+  //Serial1.begin(38400);
+
+  Serial2.begin(38400);
+
   //display.clear();
   //display.drawString(0, 0, "TTGpsPosSend");
 
@@ -465,15 +478,23 @@ void buildOutString(char* buffer)
     strcat(outBuffer, "}");
 }
 
+byte loopCounter = 0;
+byte testData[] = { 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 };
+
 //*****************************************************************************
 //
 //*****************************************************************************
 void loop()
 {
-    //Serial.println("---");
+    /*if (loopCounter++ > 16)
+    {
+        Serial1.write(testData,16);
+        loopCounter = 0;
+    }*/
 
     _haveCompass = false;
     _haveGps = false;
+    size_t udpLengthWritten;
 	
 #ifdef ICM20948
     if (millis() - _lastMpuReadTime > _timeBetweenMpuReadsMs)
@@ -602,6 +623,11 @@ void loop()
 		//Serial.print(F(" SIV: "));
 		//Serial.print(SIV);
         //Serial.println();
+
+        long accuracy = myGPS.getPositionAccuracy();
+        Serial.print(F(" 3D Positional Accuracy: "));
+        Serial.print(accuracy);
+        Serial.println(F("mm"));
 	}
 
     if (_haveCompass | _haveGps)
@@ -622,36 +648,81 @@ void loop()
 
 	// if there's data available, read a packet
 	int packetSize = udpIn.parsePacket();
-	if (packetSize)
-	{
-		Serial.print("> RTCM: size: ");
-		Serial.print(packetSize);
-		Serial.print(", From: ");
-		IPAddress remote = udpIn.remoteIP();
-		
-		for (int i = 0; i < 4; i++) 
-        {
-			Serial.print(remote[i], DEC);
-			if (i < 3) 
-	        {
-				Serial.print(".");
-			}
-		}
-		
-		Serial.print(":");
-		Serial.println(udpIn.remotePort());
+    if (packetSize)
+    {
+        Serial.print("> RTCM: size: ");
+        Serial.print(packetSize);
+        Serial.print(", From: ");
+        IPAddress remote = udpIn.remoteIP();
 
-		// read the packet into packetBufffer
-		udpIn.read(inBuffer, inDataBufferSize);
-		//Serial.println("Contents:");
-		//Serial.println(inBuffer);
+        for (int i = 0; i < 4; i++)
+        {
+            Serial.print(remote[i], DEC);
+            if (i < 3)
+            {
+                Serial.print(".");
+            }
+        }
+
+        Serial.print(":");
+        Serial.println(udpIn.remotePort());
+
+        // read the packet into packetBufffer
+        int readLen = udpIn.read(inBuffer, inDataBufferSize);
+        //Serial.println("Contents:");
+        //Serial.println(inBuffer);
+
+        //******************
+        Serial.print("--- UDP Read Len: ");
+        Serial.println(readLen);
+        //*******************
 
 		Serial.println(">>>> Sending RTCM to I2C");
-		Wire.beginTransmission(gpsI2Caddress); 
-		Wire.write(inBuffer, packetSize);              
+		
+        /*
+        Wire.beginTransmission(gpsI2Caddress); 
+		size_t writeLen = Wire.write(inBuffer, packetSize);              
 		Wire.endTransmission();     
 		Serial.println("Sent RTCM to I2C <<<<");
-	}
+
+        //******************
+        Serial.print("--- I2C Write Len: ");
+        Serial.println(writeLen);
+        //*******************
+        */
+
+        int remainingSize = packetSize;
+        int offset = 0;
+
+        /*while (0 < remainingSize)
+        {
+            Wire.beginTransmission(gpsI2Caddress);
+            udpLengthWritten = Wire.write(inBuffer + offset, remainingSize);
+            Wire.endTransmission();
+
+            remainingSize -= udpLengthWritten;
+            offset += udpLengthWritten;
+
+            //******************
+            Serial.print("--- I2C Write Len: ");
+            Serial.println(udpLengthWritten);
+            //*******************
+        }*/
+
+        while (0 < remainingSize)
+        {
+            udpLengthWritten = Serial2.write(inBuffer + offset, remainingSize);
+
+            remainingSize -= udpLengthWritten;
+            offset += udpLengthWritten;
+
+            //******************
+            Serial.print("--- Serial2 Write Len: ");
+            Serial.println(udpLengthWritten);
+            //*******************
+        }
+
+    }
 }
 
 float computeCompassHeading(ICM_20948_AGMT_t agmt)
